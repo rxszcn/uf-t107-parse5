@@ -3,6 +3,8 @@ import {
     parseFragment,
     parse,
     InsertionMode,
+    Parser,
+    TokenizerMode,
     serialize,
     defaultTreeAdapter,
     html,
@@ -312,6 +314,107 @@ describe('parser', () => {
             expect(b.childNodes).toHaveLength(1);
             expect(b.childNodes[0].nodeName).toBe('#text');
             expect((b.childNodes[0] as TextNode).value).toBe('should be outside');
+        });
+    });
+
+    // The fragment parsing algorithm gives a `<noscript>` context element the RAWTEXT tokenizer state
+    // only when the scripting flag is enabled. With scripting disabled the markup has to be parsed as
+    // in the "in head no script" / "in body" insertion modes, matching a script-disabled browser.
+    describe('noscript fragment context and the scripting flag', () => {
+        const noscriptMarkup = '<p>hi</p><b>x</b>';
+
+        it.each([
+            ['enabled (default)', {} as const, '&lt;p&gt;hi&lt;/p&gt;&lt;b&gt;x&lt;/b&gt;'],
+            ['enabled explicitly', { scriptingEnabled: true } as const, '&lt;p&gt;hi&lt;/p&gt;&lt;b&gt;x&lt;/b&gt;'],
+            ['disabled', { scriptingEnabled: false } as const, '<p>hi</p><b>x</b>'],
+        ])('parses content as %s', (_label, options, expected) => {
+            const noscript = parseFragment('<noscript></noscript>').childNodes[0] as Element;
+            const fragment = parseFragment(noscript, noscriptMarkup, options);
+
+            expect(serialize(fragment)).toBe(expected);
+        });
+
+        it('treats the tokenizer as DATA state with scripting disabled and RAWTEXT otherwise', () => {
+            const noscript = parseFragment('<noscript></noscript>').childNodes[0] as Element;
+
+            expect(Parser.getFragmentParser(noscript, { scriptingEnabled: false }).tokenizer.state).toBe(
+                TokenizerMode.DATA,
+            );
+            expect(Parser.getFragmentParser(noscript, { scriptingEnabled: true }).tokenizer.state).toBe(
+                TokenizerMode.RAWTEXT,
+            );
+            expect(Parser.getFragmentParser(noscript).tokenizer.state).toBe(TokenizerMode.RAWTEXT);
+        });
+
+        it('element context and document-level entry follow the same scripting-flag semantics', () => {
+            const findElement = (node: Element, tagName: string): Element =>
+                node.childNodes.find(
+                    (child): child is Element => 'tagName' in child && child.tagName === tagName,
+                ) as Element;
+
+            // Scripting enabled: the noscript content is raw text, both in the fragment context
+            // element and inside the head-level document noscript.
+            const textContext = parseFragment('<noscript></noscript>', {
+                scriptingEnabled: true,
+            }).childNodes[0] as Element;
+            const textParser = Parser.getFragmentParser(textContext, { scriptingEnabled: true });
+            textParser.tokenizer.write(noscriptMarkup, true);
+            const textDocument = parse(`<!doctype html><noscript>${noscriptMarkup}</noscript>`, {
+                scriptingEnabled: true,
+            });
+            const textHead = findElement(findElement(textDocument as unknown as Element, 'html'), 'head');
+            const textDocumentNoscript = findElement(textHead, 'noscript');
+            const textResult = textParser.getFragment();
+            expect(textResult.childNodes.map((node) => node.nodeName)).toEqual(['#text']);
+            expect((textResult.childNodes[0] as TextNode).value).toBe(
+                (textDocumentNoscript.childNodes[0] as TextNode).value,
+            );
+            expect((textResult.childNodes[0] as TextNode).value).toBe(noscriptMarkup);
+
+            // Scripting disabled: the markup is parsed as elements. In a document the head-level
+            // noscript stays empty and its content is reconstructed under the body; a fragment parses
+            // the same content directly as element children of the context.
+            const elementContext = parseFragment('<noscript></noscript>', {
+                scriptingEnabled: false,
+            }).childNodes[0] as Element;
+            const elementParser = Parser.getFragmentParser(elementContext, { scriptingEnabled: false });
+            elementParser.tokenizer.write(noscriptMarkup, true);
+            const elementDocument = parse(`<!doctype html><noscript>${noscriptMarkup}</noscript>`, {
+                scriptingEnabled: false,
+            });
+            const elementHtml = findElement(elementDocument as unknown as Element, 'html');
+            const head = findElement(elementHtml, 'head');
+            const body = findElement(elementHtml, 'body');
+            const documentNoscript = findElement(head, 'noscript');
+            expect(documentNoscript.childNodes).toHaveLength(0);
+            expect(serialize(body)).toBe(noscriptMarkup);
+            const elementResult = elementParser.getFragment();
+            expect(serialize(elementResult)).toBe(noscriptMarkup);
+            expect(elementResult.childNodes.map((node) => node.nodeName)).toEqual(['p', 'b']);
+        });
+
+        it('parses nested noscript markup as elements with scripting disabled', () => {
+            const noscript = parseFragment('<noscript></noscript>', { scriptingEnabled: false })
+                .childNodes[0] as Element;
+            const fragment = parseFragment(noscript, '<div>a<link rel="x"><br>b</div>', {
+                scriptingEnabled: false,
+            });
+
+            expect(serialize(fragment)).toBe('<div>a<link rel="x"><br>b</div>');
+            const div = fragment.childNodes[0] as Element;
+            expect(div.nodeName).toBe('div');
+            expect(div.childNodes.map((node) => node.nodeName)).toEqual(['#text', 'link', 'br', '#text']);
+        });
+
+        it('keeps other rawtext context elements on the RAWTEXT state regardless of the scripting flag', () => {
+            for (const tagName of ['style', 'xmp', 'iframe', 'noembed', 'noframes'] as const) {
+                const context = parseFragment(`<${tagName}></${tagName}>`).childNodes[0] as Element;
+
+                for (const scriptingEnabled of [true, false]) {
+                    const parser = Parser.getFragmentParser(context, { scriptingEnabled });
+                    expect(parser.tokenizer.state).toBe(TokenizerMode.RAWTEXT);
+                }
+            }
         });
     });
 });

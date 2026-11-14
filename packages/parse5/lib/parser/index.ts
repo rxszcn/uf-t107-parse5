@@ -393,9 +393,18 @@ export class Parser<T extends TreeAdapterTypeMap> implements TokenHandler, Stack
             case $.XMP:
             case $.IFRAME:
             case $.NOEMBED:
-            case $.NOFRAMES:
-            case $.NOSCRIPT: {
+            case $.NOFRAMES: {
                 this.tokenizer.state = TokenizerMode.RAWTEXT;
+                break;
+            }
+            //NOTE: per the fragment parsing algorithm, the `noscript` context element only selects the
+            //RAWTEXT state when scripting is enabled. With scripting disabled its content is parsed as
+            //regular markup, so the tokenizer stays in the DATA state (see the "in head" and "in body"
+            //insertion modes for the equivalent document-level behavior).
+            case $.NOSCRIPT: {
+                if (this.options.scriptingEnabled) {
+                    this.tokenizer.state = TokenizerMode.RAWTEXT;
+                }
                 break;
             }
             case $.SCRIPT: {
